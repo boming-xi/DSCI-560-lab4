@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from regime_detection import detect_regime
+from risk_management import apply_stop_loss
+
 import argparse
 from pathlib import Path
 
@@ -49,8 +52,9 @@ def load_prices_from_csv(csv_path: str, date_col: str, price_col: str) -> pd.Dat
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
-    out = df[[date_col, price_col]].copy()
-    out.columns = ["date", "close"]
+    out = df[[date_col, "High", "Low", price_col]].copy()
+    out.columns = ["date", "high", "low", "close"]
+
     out["date"] = pd.to_datetime(out["date"])
     out = out.sort_values("date").dropna(subset=["close"]).reset_index(drop=True)
     return out
@@ -87,8 +91,9 @@ def load_prices_from_yfinance(
     if price_col is None:
         raise ValueError("yfinance data missing Close/Adj Close column.")
 
-    out = df[[date_col, price_col]].copy()
-    out.columns = ["date", "close"]
+    out = df[[date_col, "High", "Low", price_col]].copy()
+    out.columns = ["date", "high", "low", "close"]
+
     out["date"] = pd.to_datetime(out["date"])
     out = out.sort_values("date").dropna(subset=["close"]).reset_index(drop=True)
     return out
@@ -100,14 +105,25 @@ def main() -> None:
         prices = load_prices_from_csv(args.csv, args.date_col, args.price_col)
     else:
         prices = load_prices_from_yfinance(args.ticker, args.start, args.end, args.interval)
+
+    regime_params = detect_regime(prices)
+
     enriched = add_indicators(
         prices,
-        fast_window=args.fast_window,
-        slow_window=args.slow_window,
+        fast_window=regime_params.fast_window,
+        slow_window=regime_params.slow_window,
         rsi_period=args.rsi_period,
     )
+
     if args.strategy == "rule":
         signals = generate_signals(enriched, rsi_buy=args.rsi_buy, rsi_sell=args.rsi_sell)
+
+        # risk management
+        signals = apply_stop_loss(
+            signals,
+            stop_loss_pct=regime_params.stop_loss_pct,
+        )
+
     else:
         signals = generate_ml_signals(
             enriched,

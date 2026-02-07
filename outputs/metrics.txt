@@ -1,7 +1,7 @@
-total_return: -0.398275386433834
-annualized_return: -0.08015860442078138
-annualized_volatility: 0.2978150677504884
-sharpe_ratio: -0.26915563751105714
-max_drawdown: -0.6861572709365127
-buy_hold_return: 12.84778940328327
-trades_count: 62.0
+total_return: 0.6096865211331244
+annualized_return: 0.08139628296070334
+annualized_volatility: 0.28374635899476913
+sharpe_ratio: 0.28686282794629225
+max_drawdown: -0.3438047907146867
+buy_hold_return: 13.332379902833194
+trades_count: 166.0
