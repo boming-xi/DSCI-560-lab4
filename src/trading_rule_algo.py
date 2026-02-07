@@ -38,8 +38,10 @@ def generate_signals(
         out["sma_fast"].shift(1) >= out["sma_slow"].shift(1)
     )
 
-    pullback_buy = (out["sma_fast"] > out["sma_slow"]) & (out["rsi"] < rsi_buy)
-    out["buy_signal"] = up_cross | pullback_buy
+    trend_up = out["sma_fast"] > out["sma_slow"]                     # <-- NEW
+    rsi_confirm = (out["rsi"] > rsi_buy) & (out["rsi"] < rsi_sell)   # <-- NEW
+
+    out["buy_signal"] = up_cross | (trend_up & rsi_confirm)          # <-- CHANGED
     out["sell_signal"] = down_cross | (out["rsi"] > rsi_sell)
 
     position = []
