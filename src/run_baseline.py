@@ -6,6 +6,7 @@ from risk_management import apply_stop_loss
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from backtest_engine import backtest
@@ -36,12 +37,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-type", default="rf", choices=["rf", "logreg"], help="ML model type.")
     parser.add_argument("--train-ratio", type=float, default=0.7, help="Train split for ML.")
     parser.add_argument(
-        "--proba-threshold", type=float, default=0.55, help="ML probability threshold for buy."
+        "--proba-threshold", type=float, default=0.48, help="ML probability threshold for buy."
     )
     parser.add_argument("--random-state", type=int, default=42, help="Random seed for ML.")
     parser.add_argument("--initial-cash", type=float, default=10000.0, help="Initial capital.")
     parser.add_argument("--fee-rate", type=float, default=0.001, help="Trading fee rate per trade.")
     parser.add_argument("--out-dir", default="outputs", help="Output directory.")
+    parser.add_argument(
+        "--benchmark-ticker",
+        default="SPY",
+        help="Benchmark ticker for relative-strength features (set to 'none' to disable).",
+    )
+    parser.add_argument(
+        "--aggressive",
+        action="store_true",
+        help="Use more aggressive parameters (shorter windows, lower thresholds, wider stop-loss).",
+    )
     return parser.parse_args()
 
 
@@ -52,8 +63,15 @@ def load_prices_from_csv(csv_path: str, date_col: str, price_col: str) -> pd.Dat
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
-    out = df[[date_col, "High", "Low", price_col]].copy()
-    out.columns = ["date", "high", "low", "close"]
+    cols = [date_col, "High", "Low", price_col]
+    has_volume = "Volume" in df.columns
+    if has_volume:
+        cols.append("Volume")
+
+    out = df[cols].copy()
+    out.columns = ["date", "high", "low", "close"] + (["volume"] if has_volume else [])
+    if not has_volume:
+        out["volume"] = np.nan
 
     out["date"] = pd.to_datetime(out["date"])
     out = out.sort_values("date").dropna(subset=["close"]).reset_index(drop=True)
@@ -91,11 +109,56 @@ def load_prices_from_yfinance(
     if price_col is None:
         raise ValueError("yfinance data missing Close/Adj Close column.")
 
-    out = df[[date_col, "High", "Low", price_col]].copy()
-    out.columns = ["date", "high", "low", "close"]
+    cols = [date_col, "High", "Low", price_col]
+    has_volume = "Volume" in df.columns
+    if has_volume:
+        cols.append("Volume")
+
+    out = df[cols].copy()
+    out.columns = ["date", "high", "low", "close"] + (["volume"] if has_volume else [])
+    if not has_volume:
+        out["volume"] = np.nan
 
     out["date"] = pd.to_datetime(out["date"])
     out = out.sort_values("date").dropna(subset=["close"]).reset_index(drop=True)
+    return out
+
+
+def load_benchmark_from_yfinance(
+    ticker: str,
+    start: str | None,
+    end: str | None,
+    interval: str,
+) -> pd.DataFrame:
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise ImportError(
+            "yfinance is not installed. Run: python3 -m pip install -r requirements.txt"
+        ) from exc
+
+    raw = yf.download(
+        ticker,
+        start=start,
+        end=end,
+        interval=interval,
+        group_by="column",
+        auto_adjust=False,
+        progress=False,
+    )
+    if raw.empty:
+        raise ValueError("No benchmark data returned from yfinance. Check ticker or date range.")
+
+    df = raw.reset_index()
+    date_col = "Date" if "Date" in df.columns else "Datetime" if "Datetime" in df.columns else df.columns[0]
+    price_col = "Close" if "Close" in df.columns else "Adj Close" if "Adj Close" in df.columns else None
+    if price_col is None:
+        raise ValueError("yfinance benchmark data missing Close/Adj Close column.")
+
+    out = df[[date_col, price_col]].copy()
+    out.columns = ["date", "benchmark_close"]
+    out["date"] = pd.to_datetime(out["date"])
+    out = out.sort_values("date").dropna(subset=["benchmark_close"]).reset_index(drop=True)
     return out
 
 
@@ -106,29 +169,64 @@ def main() -> None:
     else:
         prices = load_prices_from_yfinance(args.ticker, args.start, args.end, args.interval)
 
+    if args.strategy == "ml":
+        benchmark_ticker = (args.benchmark_ticker or "").strip()
+        if benchmark_ticker.lower() in {"none", "no", "off"}:
+            prices["benchmark_close"] = prices["close"]
+        else:
+            start = prices["date"].min().date().isoformat()
+            end = prices["date"].max().date().isoformat()
+            try:
+                benchmark = load_benchmark_from_yfinance(
+                    benchmark_ticker,
+                    start=start,
+                    end=end,
+                    interval=args.interval,
+                )
+                prices = prices.merge(benchmark, on="date", how="left")
+                prices["benchmark_close"] = prices["benchmark_close"].fillna(prices["close"])
+            except Exception as exc:  # pragma: no cover - runtime/network dependent
+                print(f"Warning: benchmark download failed ({exc}). Using self as benchmark.")
+                prices["benchmark_close"] = prices["close"]
+
     regime_params = detect_regime(prices)
+
+    fast_window = regime_params.fast_window
+    slow_window = regime_params.slow_window
+    stop_loss_pct = regime_params.stop_loss_pct
+    rsi_buy = args.rsi_buy
+    rsi_sell = args.rsi_sell
+    proba_threshold = args.proba_threshold
+
+    if args.aggressive:
+        fast_window = max(3, int(round(fast_window * 0.6)))
+        slow_window = max(fast_window + 1, int(round(slow_window * 0.6)))
+        stop_loss_pct = min(0.2, stop_loss_pct * 1.5)
+        rsi_buy = max(5.0, rsi_buy - 5.0)
+        rsi_sell = max(rsi_buy + 5.0, rsi_sell - 5.0)
+        proba_threshold = min(proba_threshold, 0.45)
 
     enriched = add_indicators(
         prices,
-        fast_window=regime_params.fast_window,
-        slow_window=regime_params.slow_window,
+        fast_window=fast_window,
+        slow_window=slow_window,
         rsi_period=args.rsi_period,
     )
 
     if args.strategy == "rule":
-        signals = generate_signals(enriched, rsi_buy=args.rsi_buy, rsi_sell=args.rsi_sell)
+        signals = generate_signals(enriched, rsi_buy=rsi_buy, rsi_sell=rsi_sell)
 
         # risk management
         signals = apply_stop_loss(
             signals,
-            stop_loss_pct=regime_params.stop_loss_pct,
+            stop_loss_pct=stop_loss_pct,
         )
 
     else:
         signals = generate_ml_signals(
             enriched,
             train_ratio=args.train_ratio,
-            prob_threshold=args.proba_threshold,
+            prob_threshold=proba_threshold,
             model_type=args.model_type,
             random_state=args.random_state,
         )
@@ -137,8 +235,9 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    signals_path = out_dir / "signals.csv"
-    metrics_path = out_dir / "metrics.txt"
+    suffix = args.strategy
+    signals_path = out_dir / f"signals_{suffix}.csv"
+    metrics_path = out_dir / f"metrics_{suffix}.txt"
     result.history.to_csv(signals_path, index=False)
 
     with metrics_path.open("w", encoding="utf-8") as f:

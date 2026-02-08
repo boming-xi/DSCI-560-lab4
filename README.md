@@ -1,13 +1,5 @@
 Stock Trading System
 
-This repo now includes a baseline algorithm development starter for your
-assignment:
-
-- Technical indicators: SMA (fast/slow) + RSI
-- Buy/sell signal generation
-- Simple backtest with portfolio metrics
-- Optional MAE/RMSE evaluation helper for forecasting models
-
 ## Quick start
 
 1. Install dependencies:
@@ -17,10 +9,6 @@ python3 -m pip install -r requirements.txt
 ```
 
 2. Option A: Use yfinance (default uses TSLA):
-
-```bash
-python3 src/run_baseline.py --ticker TSLA --start 2020-01-01 --out-dir outputs
-```
 
 Rule-based strategy (SMA + RSI):
 
@@ -41,10 +29,11 @@ python3 src/run_baseline.py \
   --start 2020-01-01 \
   --model-type rf \
   --train-ratio 0.7 \
-  --proba-threshold 0.55 \
+  --proba-threshold 0.48 \
+  --aggressive \
   --out-dir outputs
 ```
 
 4. Check outputs:
-- `outputs/signals.csv`
-- `outputs/metrics.txt`
+- Rule strategy: `outputs/signals_rule.csv`, `outputs/metrics_rule.txt`
+- ML strategy: `outputs/signals_ml.csv`, `outputs/metrics_ml.txt`
